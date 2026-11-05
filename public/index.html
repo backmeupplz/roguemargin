@@ -106,7 +106,7 @@ footer { color: var(--dim); font-size: 12px; margin: 36px 0 12px; border-top: 1p
 <div class="pager"><button id="newer" type="button">‹ Newer</button><span id="pageinfo" class="muted"></span><button id="older" type="button">Older ›</button></div>
 
 <footer>
-  Paper lanes are simulated on live Hyperliquid prices with taker fees, slippage, hourly funding and liquidation. Return counts the deposit plus the treasury chest; the chest is profit taken out of the deposit and never traded again. Net PnL is after both fees and funding. Live lanes are read straight from Hyperliquid by wallet address.
+  Paper lanes are simulated on live Hyperliquid prices with taker fees, slippage, hourly funding and liquidation. Return counts the deposit plus the treasury chest; the chest is profit taken out of the deposit and never traded again. Profit moves to the chest at milestones: the $1,000 stake once a lane's deposit reaches $4,000, then, each time the deposit grows 5× from what was left trading, that amount. Net PnL is after both fees and funding. Live lanes are read straight from Hyperliquid by wallet address.
   Not financial advice. Source: <a href="https://github.com/backmeupplz/roguemargin">github.com/backmeupplz/roguemargin</a>
 </footer>
 
@@ -140,7 +140,7 @@ function render() {
   $('#tiles').innerHTML = [
     live.length ? [`Live balance`, usd(live.reduce((s, l) => s + (l.equity || 0), 0)), live.map((l) => esc(l.name)).join(', ')] : [`Real money`, `not yet`, `paper arena first`],
     best ? [`Leader`, pct(ret(best)), esc(best.name)] : [`Leader`, '·', ''],
-    [`Treasury chest`, usd(lanes.reduce((s, l) => s + (l.treasury || 0), 0)), `25% of each closed win's net profit, taken out of the deposit`],
+    [`Treasury chest`, usd(lanes.reduce((s, l) => s + (l.treasury || 0), 0)), `stake back at 4× the deposit, then the rest at every 5×`],
     [`Lanes`, lanes.filter((l) => !l.retired_at).length, `strategies trading`],
     [`Trades`, lanes.reduce((s, l) => s + (Number(l.trades) || 0), 0), usd(lanes.reduce((s, l) => s + l.fees, 0)) + ' in fees'],
   ].map(([k, v, s]) => `<div class="tile"><small>${k}</small><b>${v}</b><small>${s}</small></div>`).join('')
