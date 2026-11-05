@@ -227,10 +227,17 @@ function connect() {
   es.onopen = () => { $('#dot').className = 'dot on'; $('#conn').textContent = 'live' }
   es.onerror = () => {
     $('#dot').className = 'dot'; $('#conn').textContent = 'reconnecting'
-    // a refused stream (e.g. 429) is not retried by the browser itself
-    if (es.readyState === EventSource.CLOSED) setTimeout(connect, 15000 + Math.random() * 15000)
+    // a refused stream (e.g. 429) is not retried by the browser itself: show the snapshot, retry the stream later
+    if (es.readyState === EventSource.CLOSED) { poll(); setTimeout(connect, 15000 + Math.random() * 15000) }
   }
 }
+async function poll() {
+  try {
+    const m = await (await fetch('/api/state')).json()
+    if (m && m.curves) { S = m; lastMsg = Date.now(); render() }
+  } catch {}
+}
+setInterval(() => { if (Date.now() - lastMsg > 30000) poll() }, 30000)
 setInterval(() => { if (lastMsg) $('#upd').textContent = `updated ${Math.round((Date.now() - lastMsg) / 1000)}s ago` }, 1000)
 connect()
 </script>

@@ -125,7 +125,8 @@ function fullJSON() {
 }
 
 // Live stream: bounded per visitor and in total, and a client that stops reading is dropped instead of buffered.
-const MAX_CLIENTS = 1000, MAX_PER_IP = 6, MAX_QUEUED = 4
+// per-IP is generous: phone carriers and offices put many visitors behind one address
+const MAX_CLIENTS = 1000, MAX_PER_IP = 30, MAX_QUEUED = 4
 type Client = { c: ReadableStreamDefaultController; ip: string }
 const clients = new Set<Client>()
 const perIp = new Map<string, number>()
@@ -194,6 +195,7 @@ Bun.serve({
           return respond('too many live connections, retry later', 'text/plain', { 'retry-after': '30' }, 429)
         server.timeout(req, 0)
         let me: Client
+        req.signal.addEventListener('abort', () => drop(me)) // free the slot as soon as the visitor leaves
         return respond(
           new ReadableStream({
             start(c) {
