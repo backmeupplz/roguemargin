@@ -1,0 +1,13 @@
+{
+  "name": "roguemargin",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dash": "bun src/dash.ts",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.3",
+    "typescript": "5.9.3"
+  }
+}
