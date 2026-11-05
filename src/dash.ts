@@ -17,7 +17,9 @@ create table if not exists positions (lane text, coin text, size real, entry rea
 create table if not exists decisions (lane text, t integer, summary text, actions text, latency_ms integer, cost_usd real, id text primary key);
 create table if not exists meta (k text primary key, v text);
 `)
-try { db.exec('alter table lanes add column treasury real default 0') } catch {} // added after launch
+// columns added after launch
+try { db.exec('alter table lanes add column treasury real default 0') } catch {}
+try { db.exec('alter table positions add column trail real') } catch {}
 
 const getMeta = (k: string) => (db.query('select v from meta where k = ?').get(k) as { v: string } | null)?.v
 const setMeta = (k: string, v: string) => db.run('insert or replace into meta values (?, ?)', [k, v])
@@ -38,7 +40,7 @@ const apply = db.transaction((events: Event[]) => {
       db.run('update lanes set treasury = ? where id = ?', [e.treasury ?? 0, e.lane])
       db.run('delete from positions where lane = ?', [e.lane])
       for (const p of e.positions)
-        db.run('insert into positions values (?,?,?,?,?,?,?,?,?,?)', [e.lane, p.coin, p.size, p.entry, p.mark, p.upnl, p.leverage, p.stop, p.target ?? null, p.liq ?? null])
+        db.run('insert into positions values (?,?,?,?,?,?,?,?,?,?,?)', [e.lane, p.coin, p.size, p.entry, p.mark, p.upnl, p.leverage, p.stop, p.target ?? null, p.liq ?? null, p.trail ?? null])
     } else if (e.type === 'fill')
       db.run('insert or ignore into fills values (?,?,?,?,?,?,?,?,?,?)', [e.lane, e.t, e.coin, e.side, e.size, e.price, e.fee, e.pnl, e.reason, `j${e.seq}`])
     else if (e.type === 'decision')
@@ -73,7 +75,7 @@ async function indexLive() {
       db.run('delete from positions where lane = ?', [l.id])
       for (const { position: p } of s.assetPositions) {
         const size = Number(p.szi)
-        db.run('insert into positions values (?,?,?,?,?,?,?,?,?,?)', [l.id, p.coin, size, Number(p.entryPx), Number(p.positionValue) / Math.abs(size), Number(p.unrealizedPnl), p.leverage.value, null, null, p.liquidationPx ? Number(p.liquidationPx) : null])
+        db.run('insert into positions values (?,?,?,?,?,?,?,?,?,?,?)', [l.id, p.coin, size, Number(p.entryPx), Number(p.positionValue) / Math.abs(size), Number(p.unrealizedPnl), p.leverage.value, null, null, p.liquidationPx ? Number(p.liquidationPx) : null, null])
       }
     })()
   }

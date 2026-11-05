@@ -144,7 +144,7 @@ function render() {
 
   $('#pos tbody').innerHTML = S.positions.map((p) => `<tr><td>${esc(name[p.lane] ?? p.lane)}</td><td>${esc(p.coin)}</td>
     <td class="${p.size > 0 ? 'up' : 'down'}">${p.size > 0 ? 'LONG' : 'SHORT'}</td><td>${usd(Math.abs(p.size) * p.mark, 0)}</td><td>${p.leverage}x</td>
-    <td>${px(p.entry)}</td><td>${px(p.mark)}</td><td>${px(p.stop)}</td><td>${px(p.target)}</td><td class="${cls(p.upnl)}">${usd(p.upnl)}</td></tr>`).join('') || `<tr><td colspan="10" class="empty">Flat. No open positions.</td></tr>`
+    <td>${px(p.entry)}</td><td>${px(p.mark)}</td><td>${px(p.stop)}</td><td>${p.trail ? `<span class="up">riding</span>, trail ${(p.trail / p.mark * 100).toFixed(2)}%` : px(p.target)}</td><td class="${cls(p.upnl)}">${usd(p.upnl)}</td></tr>`).join('') || `<tr><td colspan="10" class="empty">Flat. No open positions.</td></tr>`
 
   $('#log').innerHTML = S.decisions.map((d) => {
     const acts = (JSON.parse(d.actions || '[]') || []).filter((a) => a.action !== 'hold').map((a) => `${a.action.toUpperCase()} ${a.coin}${a.size_usd ? ' ' + usd(a.size_usd, 0) : ''}${a.leverage ? ' ' + a.leverage + 'x' : ''}`).join(' · ')
