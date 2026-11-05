@@ -17,6 +17,7 @@ create table if not exists positions (lane text, coin text, size real, entry rea
 create table if not exists decisions (lane text, t integer, summary text, actions text, latency_ms integer, cost_usd real, id text primary key);
 create table if not exists meta (k text primary key, v text);
 `)
+try { db.exec('alter table lanes add column treasury real default 0') } catch {} // added after launch
 
 const getMeta = (k: string) => (db.query('select v from meta where k = ?').get(k) as { v: string } | null)?.v
 const setMeta = (k: string, v: string) => db.run('insert or replace into meta values (?, ?)', [k, v])
@@ -24,16 +25,17 @@ const setMeta = (k: string, v: string) => db.run('insert or replace into meta va
 // The trader appends events to its journal; we tail it by sequence number.
 type Event =
   | { seq: number; type: 'lane'; lane: string; name: string; model: string; feed: string; mode: string; address?: string; start_equity: number; t: number; retired_at?: number }
-  | { seq: number; type: 'equity'; lane: string; t: number; equity: number; positions: any[] }
+  | { seq: number; type: 'equity'; lane: string; t: number; equity: number; treasury?: number; positions: any[] }
   | { seq: number; type: 'fill'; lane: string; t: number; coin: string; side: string; size: number; price: number; fee: number; pnl: number; reason: string }
   | { seq: number; type: 'decision'; lane: string; t: number; summary: string; actions: unknown; latency_ms: number; cost_usd: number }
 
 const apply = db.transaction((events: Event[]) => {
   for (const e of events) {
     if (e.type === 'lane')
-      db.run('insert or replace into lanes values (?,?,?,?,?,?,?,?,?)', [e.lane, e.name, e.model, e.feed, e.mode, e.address ?? null, e.start_equity, e.t, e.retired_at ?? null])
+      db.run('insert or replace into lanes values (?,?,?,?,?,?,?,?,?,?)', [e.lane, e.name, e.model, e.feed, e.mode, e.address ?? null, e.start_equity, e.t, e.retired_at ?? null, 0])
     else if (e.type === 'equity') {
       db.run('insert or replace into equity values (?,?,?)', [e.lane, e.t, e.equity])
+      db.run('update lanes set treasury = ? where id = ?', [e.treasury ?? 0, e.lane])
       db.run('delete from positions where lane = ?', [e.lane])
       for (const p of e.positions)
         db.run('insert into positions values (?,?,?,?,?,?,?,?,?,?)', [e.lane, p.coin, p.size, p.entry, p.mark, p.upnl, p.leverage, p.stop, p.target ?? null, p.liq ?? null])
