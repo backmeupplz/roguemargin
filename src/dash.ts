@@ -7,23 +7,23 @@ const TRADER = process.env.TRADER_URL ?? 'http://127.0.0.1:8790'
 const PORT = Number(process.env.PORT ?? 8080)
 const HL = process.env.HL_API ?? 'https://api.hyperliquid.xyz'
 
+// This database is only an index of the journal and the chain, so a schema change simply rebuilds it.
+const SCHEMA = '2'
 const db = new Database(DB, { create: true })
-db.exec(`
-pragma journal_mode = wal;
-create table if not exists lanes (id text primary key, name text, model text, feed text, mode text, address text, start_equity real, started_at integer, retired_at integer);
-create table if not exists equity (lane text, t integer, equity real, primary key (lane, t));
-create table if not exists fills (lane text, t integer, coin text, side text, size real, price real, fee real, pnl real, reason text, id text primary key);
-create table if not exists positions (lane text, coin text, size real, entry real, mark real, upnl real, leverage real, stop real, target real, liq real, primary key (lane, coin));
-create table if not exists decisions (lane text, t integer, summary text, actions text, latency_ms integer, cost_usd real, id text primary key);
-create table if not exists meta (k text primary key, v text);
-`)
-// columns added after launch
-try { db.exec('alter table lanes add column treasury real default 0') } catch {}
-try { db.exec('alter table positions add column trail real') } catch {}
-try { db.exec('alter table fills add column net real') } catch {}
-
+db.exec('pragma journal_mode = wal; create table if not exists meta (k text primary key, v text);')
 const getMeta = (k: string) => (db.query('select v from meta where k = ?').get(k) as { v: string } | null)?.v
 const setMeta = (k: string, v: string) => db.run('insert or replace into meta values (?, ?)', [k, v])
+if (getMeta('schema') !== SCHEMA) {
+  db.exec('drop table if exists lanes; drop table if exists equity; drop table if exists fills; drop table if exists positions; drop table if exists decisions; delete from meta;')
+  setMeta('schema', SCHEMA)
+}
+db.exec(`
+create table if not exists lanes (id text primary key, name text, model text, feed text, mode text, address text, start_equity real, started_at integer, retired_at integer, treasury real default 0);
+create table if not exists equity (lane text, t integer, equity real, primary key (lane, t));
+create table if not exists fills (lane text, t integer, coin text, side text, size real, price real, fee real, pnl real, reason text, id text primary key, net real);
+create table if not exists positions (lane text, coin text, size real, entry real, mark real, upnl real, leverage real, stop real, target real, liq real, trail real, primary key (lane, coin));
+create table if not exists decisions (lane text, t integer, summary text, actions text, latency_ms integer, cost_usd real, id text primary key);
+`)
 
 // The trader appends events to its journal; we tail it by sequence number.
 type Event =
@@ -32,20 +32,29 @@ type Event =
   | { seq: number; type: 'fill'; lane: string; t: number; coin: string; side: string; size: number; price: number; fee: number; pnl: number; net?: number; reason: string }
   | { seq: number; type: 'decision'; lane: string; t: number; summary: string; actions: unknown; latency_ms: number; cost_usd: number }
 
+const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+const str = (v: unknown, max: number) => (v == null ? null : String(v).slice(0, max))
+// Only what the page renders is stored and served.
+const publicActions = (xs: unknown) =>
+  (Array.isArray(xs) ? xs.slice(0, 12) : []).filter((a) => a && typeof a === 'object').map((a: any) => ({
+    coin: str(a.coin, 12), action: str(a.action, 16), result: str(a.result, 160),
+    leverage: n(a.leverage), stop_loss: n(a.stop_loss), take_profit: n(a.take_profit), trailing: a.trailing === true || undefined,
+  }))
+
 const apply = db.transaction((events: Event[]) => {
   for (const e of events) {
     if (e.type === 'lane')
       db.run('insert or replace into lanes values (?,?,?,?,?,?,?,?,?,?)', [e.lane, e.name, e.model, e.feed, e.mode, e.address ?? null, e.start_equity, e.t, e.retired_at ?? null, 0])
     else if (e.type === 'equity') {
       db.run('insert or replace into equity values (?,?,?)', [e.lane, e.t, e.equity])
-      db.run('update lanes set treasury = ? where id = ?', [e.treasury ?? 0, e.lane])
+      db.run('update lanes set treasury = ? where id = ?', [n(e.treasury) ?? 0, e.lane])
       db.run('delete from positions where lane = ?', [e.lane])
-      for (const p of e.positions)
-        db.run('insert into positions values (?,?,?,?,?,?,?,?,?,?,?)', [e.lane, p.coin, p.size, p.entry, p.mark, p.upnl, p.leverage, p.stop, p.target ?? null, p.liq ?? null, p.trail ?? null])
+      for (const p of Array.isArray(e.positions) ? e.positions : [])
+        db.run('insert or replace into positions values (?,?,?,?,?,?,?,?,?,?,?)', [e.lane, str(p.coin, 12), n(p.size), n(p.entry), n(p.mark), n(p.upnl), n(p.leverage), n(p.stop), n(p.target), n(p.liq), n(p.trail)])
     } else if (e.type === 'fill')
-      db.run('insert or ignore into fills values (?,?,?,?,?,?,?,?,?,?,?)', [e.lane, e.t, e.coin, e.side, e.size, e.price, e.fee, e.pnl, e.reason, `j${e.seq}`, e.net ?? null])
+      db.run('insert or ignore into fills values (?,?,?,?,?,?,?,?,?,?,?)', [e.lane, e.t, str(e.coin, 12), str(e.side, 8), n(e.size), n(e.price), n(e.fee), n(e.pnl), str(e.reason, 24), `j${e.seq}`, n(e.net)])
     else if (e.type === 'decision')
-      db.run('insert or ignore into decisions values (?,?,?,?,?,?,?)', [e.lane, e.t, e.summary, JSON.stringify(e.actions), e.latency_ms, e.cost_usd, `j${e.seq}`])
+      db.run('insert or ignore into decisions values (?,?,?,?,?,?,?)', [e.lane, e.t, str(e.summary, 400) ?? '', JSON.stringify(publicActions(e.actions)), n(e.latency_ms), n(e.cost_usd), `j${e.seq}`])
     setMeta('seq', String(e.seq))
   }
 })
@@ -53,6 +62,7 @@ const apply = db.transaction((events: Event[]) => {
 async function tailJournal() {
   const after = getMeta('seq') ?? '0'
   const events = (await (await fetch(`${TRADER}/journal?after=${after}`, { signal: AbortSignal.timeout(10_000) })).json()) as Event[]
+  if (!Array.isArray(events)) return 0
   if (events.length) apply(events)
   return events.length
 }
@@ -69,7 +79,7 @@ async function indexLive() {
     for (const f of fills)
       // ponytail: live net = closedPnl - this fill's fee; entry fee and funding are on other rows (userFunding)
       db.run('insert or ignore into fills values (?,?,?,?,?,?,?,?,?,?,?)', [l.id, f.time, f.coin, f.side === 'B' ? 'buy' : 'sell', Number(f.sz), Number(f.px), Number(f.fee), Number(f.closedPnl), f.dir, f.hash + ':' + f.tid, Number(f.closedPnl) ? Number(f.closedPnl) - Number(f.fee) : null])
-    if (fills.length) setMeta(`fills:${l.id}`, String(Math.max(...fills.map((f) => f.time))))
+    if (fills.length) setMeta(`fills:${l.id}`, String(fills.reduce((m, f) => Math.max(m, f.time), 0)))
     const s = await info({ type: 'clearinghouseState', user: l.address })
     const t = Math.floor(Date.now() / 60_000) * 60_000
     db.transaction(() => {
@@ -84,12 +94,10 @@ async function indexLive() {
 }
 
 // ---- web ----
-const clients = new Set<ReadableStreamDefaultController>()
-let stamp = 0
-
 const curves = (since: number) =>
   db.query('select lane, t, equity from equity where t >= ? and (t > ? or t % 900000 = 0) order by t').all(since, Date.now() - 86400_000)
 let tailFrom = Date.now()
+let stamp = 0
 
 function snapshot(full: boolean) {
   const lanes = db.query(`
@@ -109,42 +117,110 @@ function snapshot(full: boolean) {
   }
 }
 
-function broadcast() {
-  stamp = Date.now()
-  const msg = new TextEncoder().encode(`data: ${JSON.stringify(snapshot(false))}\n\n`)
-  tailFrom = Math.floor(Date.now() / 60_000) * 60_000 - 60_000
-  for (const c of clients) try { c.enqueue(msg) } catch { clients.delete(c) }
+// The full snapshot is the expensive one (30 days of curves): build it at most once per update or every 5 s.
+let full: { stamp: number; at: number; json: string } | undefined
+function fullJSON() {
+  if (!full || full.stamp !== stamp || Date.now() - full.at > 5_000) full = { stamp, at: Date.now(), json: JSON.stringify(snapshot(true)) }
+  return full.json
 }
 
-const page = Bun.file(new URL('../public/index.html', import.meta.url))
+// Live stream: bounded per visitor and in total, and a client that stops reading is dropped instead of buffered.
+const MAX_CLIENTS = 1000, MAX_PER_IP = 6, MAX_QUEUED = 4
+type Client = { c: ReadableStreamDefaultController; ip: string }
+const clients = new Set<Client>()
+const perIp = new Map<string, number>()
+const enc = new TextEncoder()
+function drop(x: Client) {
+  if (!clients.delete(x)) return
+  const left = (perIp.get(x.ip) ?? 1) - 1
+  left > 0 ? perIp.set(x.ip, left) : perIp.delete(x.ip)
+  try { x.c.close() } catch {}
+}
+
+function broadcast() {
+  stamp = Date.now()
+  const msg = enc.encode(`data: ${JSON.stringify(snapshot(false))}\n\n`)
+  tailFrom = Math.floor(Date.now() / 60_000) * 60_000 - 60_000
+  for (const x of clients) {
+    if ((x.c.desiredSize ?? 0) < -MAX_QUEUED) { drop(x); continue }
+    try { x.c.enqueue(msg) } catch { drop(x) }
+  }
+}
+
+// ---- headers ----
+const page = await Bun.file(new URL('../public/index.html', import.meta.url)).text()
+// The page's one inline script, allowed by hash: nothing injected into the page can run.
+const script = page.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? ''
+const scriptHash = new Bun.CryptoHasher('sha256').update(script).digest('base64')
+const CSP = [
+  "default-src 'none'",
+  `script-src 'sha256-${scriptHash}'`,
+  "style-src 'unsafe-inline' https://fonts.googleapis.com",
+  'font-src https://fonts.gstatic.com',
+  "img-src 'self' data:",
+  "connect-src 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join('; ')
+const SECURITY = {
+  'strict-transport-security': 'max-age=31536000; includeSubDomains',
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+  'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+  'cross-origin-opener-policy': 'same-origin',
+  'x-frame-options': 'DENY',
+}
+const respond = (body: BodyInit | null, type: string, extra: Record<string, string> = {}, status = 200) =>
+  new Response(body, { status, headers: { ...SECURITY, 'content-type': type, ...extra } })
+const file = (name: string, type: string) => {
+  const f = Bun.file(new URL(`../public/${name}`, import.meta.url))
+  return () => respond(f, type, { 'cache-control': 'public, max-age=3600' })
+}
+
 Bun.serve({
   port: PORT,
-  idleTimeout: 0,
+  development: false, // never Bun's debug error page
+  idleTimeout: 30, // the live stream opts out below; it gets data every 5 s anyway
+  error: (e) => (console.error('http', e), respond('error', 'text/plain', {}, 500)),
   routes: {
-    '/': () => new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' } }),
-    '/api/state': () => Response.json(snapshot(true)),
-    '/api/live': (req) => {
-      let ctl: ReadableStreamDefaultController
-      return new Response(
-        new ReadableStream({
-          start(c) { ctl = c; clients.add(c); c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(snapshot(true))}\n\n`)) },
-          cancel() { clients.delete(ctl) },
-        }),
-        { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'x-accel-buffering': 'no' } },
-      )
+    '/': { GET: () => respond(page, 'text/html; charset=utf-8', { 'cache-control': 'no-cache', 'content-security-policy': CSP }) },
+    '/api/state': { GET: () => respond(fullJSON(), 'application/json', { 'cache-control': 'no-cache' }) },
+    '/api/live': {
+      GET: (req, server) => {
+        // Tugport's proxy sets x-real-ip to the real client; the container port is not reachable from outside
+        const ip = req.headers.get('x-real-ip') ?? server.requestIP(req)?.address ?? 'unknown'
+        if (clients.size >= MAX_CLIENTS || (perIp.get(ip) ?? 0) >= MAX_PER_IP)
+          return respond('too many live connections, retry later', 'text/plain', { 'retry-after': '30' }, 429)
+        server.timeout(req, 0)
+        let me: Client
+        return respond(
+          new ReadableStream({
+            start(c) {
+              me = { c, ip }
+              clients.add(me)
+              perIp.set(ip, (perIp.get(ip) ?? 0) + 1)
+              c.enqueue(enc.encode(`data: ${fullJSON()}\n\n`))
+            },
+            cancel() { drop(me) },
+          }),
+          'text/event-stream',
+          { 'cache-control': 'no-cache', 'x-accel-buffering': 'no' },
+        )
+      },
     },
-    '/og.png': () => new Response(Bun.file(new URL('../public/og.png', import.meta.url))),
-    '/favicon.svg': () => new Response(Bun.file(new URL('../public/favicon.svg', import.meta.url)), { headers: { 'content-type': 'image/svg+xml' } }),
+    '/og.png': { GET: file('og.png', 'image/png') },
+    '/favicon.svg': { GET: file('favicon.svg', 'image/svg+xml') },
   },
-  fetch: () => new Response('not found', { status: 404 }),
+  fetch: () => respond('not found', 'text/plain', {}, 404),
 })
 
 async function loop() {
   for (;;) {
     try {
-      const n = await tailJournal()
+      const got = await tailJournal()
       await indexLive()
-      if (n || clients.size) broadcast()
+      if (got || clients.size) broadcast()
     } catch (e) {
       console.error('index', (e as Error).message)
     }

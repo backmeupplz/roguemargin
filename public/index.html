@@ -113,7 +113,9 @@ const usd = (n, d = 2) => (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString('en-
 const pct = (n) => (n >= 0 ? '+' : '') + n.toFixed(2) + '%'
 const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : 'muted')
 const px = (n) => n == null ? '·' : Number(n).toLocaleString('en-US', { maximumSignificantDigits: 6, useGrouping: false })
-const utc = (t) => new Date(t).toISOString().slice(5, 16).replace('T', ' ')
+const utc = (t) => { const d = new Date(Number(t)); return isNaN(d) ? '·' : d.toISOString().slice(5, 16).replace('T', ' ') }
+const parse = (s, fallback) => { try { return JSON.parse(s) ?? fallback } catch { return fallback } }
+const lo = (xs) => xs.reduce((m, v) => (v < m ? v : m), Infinity), hi = (xs) => xs.reduce((m, v) => (v > m ? v : m), -Infinity)
 let S = null, sel = null, lastMsg = 0
 
 function render() {
@@ -128,31 +130,35 @@ function render() {
   const live = lanes.filter((l) => l.mode === 'live' && !l.retired_at)
   const isBaseline = (l) => l.feed?.startsWith('baseline')
   const best = lanes.filter((l) => !l.retired_at && !isBaseline(l))[0] ?? lanes[0]
-  const start = Math.min(...lanes.map((l) => l.started_at).filter(Boolean))
+  const start = lo(lanes.map((l) => l.started_at).filter(Boolean))
   $('#day').textContent = isFinite(start) ? `day ${Math.floor((Date.now() - start) / 86400e3) + 1} of the arena` : ''
   $('#tiles').innerHTML = [
     live.length ? [`Live balance`, usd(live.reduce((s, l) => s + (l.equity || 0), 0)), live.map((l) => esc(l.name)).join(', ')] : [`Real money`, `not yet`, `paper arena first`],
     best ? [`Leader`, pct(ret(best)), esc(best.name)] : [`Leader`, '·', ''],
     [`Treasury chest`, usd(lanes.reduce((s, l) => s + (l.treasury || 0), 0)), `25% of each win's net profit, taken out of the deposit`],
     [`Lanes`, lanes.filter((l) => !l.retired_at).length, `strategies trading`],
-    [`Trades`, lanes.reduce((s, l) => s + l.trades, 0), usd(lanes.reduce((s, l) => s + l.fees, 0)) + ' in fees'],
+    [`Trades`, lanes.reduce((s, l) => s + (Number(l.trades) || 0), 0), usd(lanes.reduce((s, l) => s + l.fees, 0)) + ' in fees'],
   ].map(([k, v, s]) => `<div class="tile"><small>${k}</small><b>${v}</b><small>${s}</small></div>`).join('')
 
   $('#board tbody').innerHTML = lanes.map((l, i) => `<tr data-id="${esc(l.id)}" class="${l.id === sel ? 'sel' : ''}">
     <td>${i + 1}</td><td class="l">${esc(l.name)} <span class="pill ${l.mode === 'live' ? 'live' : ''}">${l.retired_at ? 'retired' : esc(l.mode)}</span><br><span class="muted">${isBaseline(l) ? 'baseline, no AI' : `${esc(l.model)} · ${esc(l.feed)}`}</span></td>
-    <td class="${cls(ret(l))}">${pct(ret(l))}</td><td>${l.equity != null ? usd(l.equity - (l.treasury || 0)) : '·'}</td><td>${l.treasury ? usd(l.treasury) : '·'}</td><td>${l.trades}</td><td>${usd(l.fees)}</td><td>${open[l.id] || 0}</td></tr>`).join('') || `<tr><td colspan="8" class="empty">Waiting for the first lane.</td></tr>`
+    <td class="${cls(ret(l))}">${pct(ret(l))}</td><td>${l.equity != null ? usd(l.equity - (l.treasury || 0)) : '·'}</td><td>${l.treasury ? usd(l.treasury) : '·'}</td><td>${esc(l.trades)}</td><td>${usd(l.fees)}</td><td>${open[l.id] || 0}</td></tr>`).join('') || `<tr><td colspan="8" class="empty">Waiting for the first lane.</td></tr>`
 
   $('#pos tbody').innerHTML = S.positions.map((p) => `<tr><td>${esc(name[p.lane] ?? p.lane)}</td><td>${esc(p.coin)}</td>
-    <td class="${p.size > 0 ? 'up' : 'down'}">${p.size > 0 ? 'LONG' : 'SHORT'}</td><td>${usd(Math.abs(p.size) * p.mark, 0)}</td><td>${p.leverage}x</td>
+    <td class="${p.size > 0 ? 'up' : 'down'}">${p.size > 0 ? 'LONG' : 'SHORT'}</td><td>${usd(Math.abs(p.size) * p.mark, 0)}</td><td>${esc(p.leverage)}x</td>
     <td>${px(p.entry)}</td><td>${px(p.mark)}</td><td>${px(p.stop)}</td><td>${p.trail ? `<span class="up">riding</span>, trail ${(p.trail / p.mark * 100).toFixed(2)}%` : px(p.target)}</td><td class="${cls(p.upnl)}">${usd(p.upnl)}</td></tr>`).join('') || `<tr><td colspan="10" class="empty">Flat. No open positions.</td></tr>`
 
   $('#log').innerHTML = S.decisions.map((d) => {
-    const acts = (JSON.parse(d.actions || '[]') || []).filter((a) => a.action !== 'hold').map((a) => `${a.action.toUpperCase()} ${a.coin}${a.size_usd ? ' ' + usd(a.size_usd, 0) : ''}${a.leverage ? ' ' + a.leverage + 'x' : ''}`).join(' · ')
+    const acts = parse(d.actions, []).filter((a) => a && a.action && a.action !== 'hold').map((a) => {
+      const size = /\$\d+/.exec(String(a.result ?? ''))?.[0]
+      const exits = a.stop_loss != null ? ` stop ${px(a.stop_loss)}${a.trailing ? ' trailing' : a.take_profit != null ? ` target ${px(a.take_profit)}` : ''}` : ''
+      return `${String(a.action).replace('_', ' ').toUpperCase()} ${a.coin}${size ? ' ' + size : ''}${a.leverage ? ' ' + a.leverage + 'x' : ''}${exits}`
+    }).join(' · ')
     return `<p><time>${utc(d.t)}</time> <span class="who">${esc(name[d.lane] ?? d.lane)}</span>${acts ? `<span class="act">${esc(acts)}</span>` : ''} ${esc(d.summary)}</p>`
   }).join('') || `<p class="empty">No decisions yet.</p>`
 
   $('#fills tbody').innerHTML = S.fills.map((f) => `<tr><td>${utc(f.t)}</td><td>${esc(name[f.lane] ?? f.lane)}</td><td>${esc(f.coin)}</td>
-    <td class="${f.side === 'buy' ? 'up' : 'down'}">${f.side.toUpperCase()}</td><td>${px(f.size)}</td><td>${px(f.price)}</td>
+    <td class="${f.side === 'buy' ? 'up' : 'down'}">${esc(String(f.side ?? '').toUpperCase())}</td><td>${px(f.size)}</td><td>${px(f.price)}</td>
     <td class="${cls(f.net ?? f.pnl)}">${f.net != null ? usd(f.net) : f.pnl ? usd(f.pnl - f.fee) : '·'}</td><td>${usd(f.fee)}</td><td class="muted">${esc(f.reason)}</td></tr>`).join('') || `<tr><td colspan="9" class="empty">No trades yet.</td></tr>`
 
   $('#selname').textContent = name[sel] ?? 'selected lane'
@@ -166,14 +172,15 @@ function chart() {
   for (const r of S.curves) (series[r.lane] ||= []).push([r.t, (r.equity / start[r.lane] - 1) * 100])
   const all = Object.values(series).flat()
   if (all.length < 2) { svg.innerHTML = `<text x="16" y="40" fill="#5f8f68" font-size="13">The curve appears after the first minutes of trading.</text>`; return }
-  const t0 = Math.min(...all.map((p) => p[0])), t1 = Math.max(...all.map((p) => p[0]))
-  let lo = Math.min(0, ...all.map((p) => p[1])), hi = Math.max(0, ...all.map((p) => p[1]))
-  const pad = Math.max(0.5, (hi - lo) * 0.08); lo -= pad; hi += pad
+  // reduce, not Math.min(...all): spreading 100k+ points throws
+  const t0 = lo(all.map((p) => p[0])), t1 = hi(all.map((p) => p[0]))
+  let bottom = Math.min(0, lo(all.map((p) => p[1]))), top = Math.max(0, hi(all.map((p) => p[1])))
+  const pad = Math.max(0.5, (top - bottom) * 0.08); bottom -= pad; top += pad
   const x = (t) => P.l + ((t - t0) / Math.max(1, t1 - t0)) * (W - P.l - P.r)
-  const y = (v) => P.t + (1 - (v - lo) / (hi - lo)) * (H - P.t - P.b)
+  const y = (v) => P.t + (1 - (v - bottom) / (top - bottom)) * (H - P.t - P.b)
   const path = (pts) => pts.map((p, i) => (i ? 'L' : 'M') + x(p[0]).toFixed(1) + ' ' + y(p[1]).toFixed(1)).join('')
-  const step = niceStep((hi - lo) / 5), ticks = []
-  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) ticks.push(v)
+  const step = niceStep((top - bottom) / 5), ticks = []
+  for (let v = Math.ceil(bottom / step) * step; v <= top; v += step) ticks.push(v)
   const isBase = (id) => S.lanes.find((l) => l.id === id)?.feed === 'baseline-btc-hold'
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`)
   svg.innerHTML =
@@ -208,7 +215,8 @@ addEventListener('resize', () => S && chart())
 function connect() {
   const es = new EventSource('/api/live')
   es.onmessage = (e) => {
-    const m = JSON.parse(e.data)
+    const m = parse(e.data, null)
+    if (!m) return
     if (m.tail && S) {
       const key = (r) => r.lane + ':' + r.t, have = new Map(S.curves.map((r, i) => [key(r), i]))
       for (const r of m.tail) have.has(key(r)) ? (S.curves[have.get(key(r))] = r) : S.curves.push(r)
@@ -217,7 +225,11 @@ function connect() {
     if (m.curves) { S = m; lastMsg = Date.now(); render() }
   }
   es.onopen = () => { $('#dot').className = 'dot on'; $('#conn').textContent = 'live' }
-  es.onerror = () => { $('#dot').className = 'dot'; $('#conn').textContent = 'reconnecting' }
+  es.onerror = () => {
+    $('#dot').className = 'dot'; $('#conn').textContent = 'reconnecting'
+    // a refused stream (e.g. 429) is not retried by the browser itself
+    if (es.readyState === EventSource.CLOSED) setTimeout(connect, 15000 + Math.random() * 15000)
+  }
 }
 setInterval(() => { if (lastMsg) $('#upd').textContent = `updated ${Math.round((Date.now() - lastMsg) / 1000)}s ago` }, 1000)
 connect()
