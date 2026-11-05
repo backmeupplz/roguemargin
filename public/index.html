@@ -134,7 +134,7 @@ function render() {
     live.length ? [`Live balance`, usd(live.reduce((s, l) => s + (l.equity || 0), 0)), live.map((l) => esc(l.name)).join(', ')] : [`Real money`, `not yet`, `paper arena first`],
     best ? [`Leader`, pct(ret(best)), esc(best.name)] : [`Leader`, '·', ''],
     [`Treasury chest`, usd(lanes.reduce((s, l) => s + (l.treasury || 0), 0)), `25% of each win's net profit, taken out of the deposit`],
-    [`Lanes`, lanes.filter((l) => !l.retired_at).length, `models × data feeds`],
+    [`Lanes`, lanes.filter((l) => !l.retired_at).length, `strategies trading`],
     [`Trades`, lanes.reduce((s, l) => s + l.trades, 0), usd(lanes.reduce((s, l) => s + l.fees, 0)) + ' in fees'],
   ].map(([k, v, s]) => `<div class="tile"><small>${k}</small><b>${v}</b><small>${s}</small></div>`).join('')
 
