@@ -23,7 +23,13 @@ create table if not exists equity (lane text, t integer, equity real, primary ke
 create table if not exists fills (lane text, t integer, coin text, side text, size real, price real, fee real, pnl real, reason text, id text primary key, net real);
 create table if not exists positions (lane text, coin text, size real, entry real, mark real, upnl real, leverage real, stop real, target real, liq real, trail real, primary key (lane, coin));
 create table if not exists decisions (lane text, t integer, summary text, actions text, latency_ms integer, cost_usd real, id text primary key);
+create index if not exists equity_t on equity (t);
+create index if not exists fills_t on fills (t);
+create index if not exists fills_lane on fills (lane);
+create index if not exists decisions_t on decisions (t);
 `)
+// The chart shows 15-minute points past 24 h, so minute points older than 2 days are dead weight.
+const prune = () => db.run('delete from equity where t < ? and t % 900000 != 0', [Date.now() - 2 * 86400_000])
 
 // The trader appends events to its journal; we tail it by sequence number.
 type Event =
@@ -73,6 +79,7 @@ const info = async (body: object) =>
 // Live lanes: truth comes from the chain, not from the trader. Fills by hash, equity + positions from clearinghouseState.
 async function indexLive() {
   const live = db.query("select id, address from lanes where mode = 'live' and address is not null and retired_at is null").all() as { id: string; address: string }[]
+  if (!live.length) return false
   for (const l of live) {
     const since = Number(getMeta(`fills:${l.id}`) ?? 0)
     const fills = (await info({ type: 'userFillsByTime', user: l.address, startTime: since + 1, aggregateByTime: true })) as any[]
@@ -91,6 +98,7 @@ async function indexLive() {
       }
     })()
   }
+  return true
 }
 
 // ---- web ----
@@ -99,7 +107,14 @@ const curves = (since: number) =>
 let tailFrom = Date.now()
 let stamp = 0
 
+// fills and decisions only travel when they changed; the page keeps its previous copy otherwise
+const version = (table: string) => JSON.stringify(db.query(`select count(*) as n, max(t) as t from ${table}`).get())
+let sent = { fills: '', decisions: '' }
+
 function snapshot(full: boolean) {
+  const v = { fills: version('fills'), decisions: version('decisions') }
+  const changed = { fills: full || v.fills !== sent.fills, decisions: full || v.decisions !== sent.decisions }
+  if (!full) sent = v
   const lanes = db.query(`
     select l.*, (select equity from equity e where e.lane = l.id order by t desc limit 1) as equity,
       (select count(*) from fills f where f.lane = l.id) as trades,
@@ -112,8 +127,8 @@ function snapshot(full: boolean) {
     curves: full ? curves(Date.now() - 30 * 86400_000) : undefined,
     tail: full ? undefined : db.query('select lane, t, equity from equity where t >= ? order by t').all(tailFrom),
     positions: db.query('select * from positions').all(),
-    fills: db.query('select * from fills order by t desc limit 200').all(),
-    decisions: db.query('select * from decisions order by t desc limit 60').all(),
+    fills: changed.fills ? db.query('select * from fills order by t desc limit 200').all() : undefined,
+    decisions: changed.decisions ? db.query('select * from decisions order by t desc limit 60').all() : undefined,
   }
 }
 
@@ -125,8 +140,8 @@ function fullJSON() {
 }
 
 // Live stream: bounded per visitor and in total, and a client that stops reading is dropped instead of buffered.
-// per-IP is generous: phone carriers and offices put many visitors behind one address
-const MAX_CLIENTS = 1000, MAX_PER_IP = 30, MAX_QUEUED = 4
+// per-IP is generous (phone carriers and offices put many visitors behind one address); a refused page polls the cached snapshot
+const MAX_CLIENTS = 5000, MAX_PER_IP = 20, MAX_QUEUED = 4
 type Client = { c: ReadableStreamDefaultController; ip: string }
 const clients = new Set<Client>()
 const perIp = new Map<string, number>()
@@ -138,15 +153,21 @@ function drop(x: Client) {
   try { x.c.close() } catch {}
 }
 
-function broadcast() {
-  stamp = Date.now()
-  const msg = enc.encode(`data: ${JSON.stringify(snapshot(false))}\n\n`)
-  tailFrom = Math.floor(Date.now() / 60_000) * 60_000 - 60_000
+let lastSent = 0
+function send(msg: Uint8Array) {
+  lastSent = Date.now()
   for (const x of clients) {
     if ((x.c.desiredSize ?? 0) < -MAX_QUEUED) { drop(x); continue }
     try { x.c.enqueue(msg) } catch { drop(x) }
   }
 }
+function broadcast() {
+  stamp = Date.now()
+  const msg = enc.encode(`data: ${JSON.stringify(snapshot(false))}\n\n`)
+  tailFrom = Math.floor(Date.now() / 60_000) * 60_000 - 60_000
+  send(msg)
+}
+const ping = enc.encode(': ping\n\n') // keeps idle streams and proxies alive, and finds dead clients
 
 // ---- headers ----
 const page = await Bun.file(new URL('../public/index.html', import.meta.url)).text()
@@ -218,11 +239,14 @@ Bun.serve({
 })
 
 async function loop() {
+  let lastPrune = 0
   for (;;) {
     try {
       const got = await tailJournal()
-      await indexLive()
-      if (got || clients.size) broadcast()
+      const live = await indexLive()
+      if (got || live) broadcast() // only when something changed: the trader writes once a minute
+      else if (clients.size && Date.now() - lastSent > 25_000) send(ping)
+      if (Date.now() - lastPrune > 3600_000) { prune(); lastPrune = Date.now() }
     } catch (e) {
       console.error('index', (e as Error).message)
     }

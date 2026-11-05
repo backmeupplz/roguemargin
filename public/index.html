@@ -221,6 +221,8 @@ function connect() {
       const key = (r) => r.lane + ':' + r.t, have = new Map(S.curves.map((r, i) => [key(r), i]))
       for (const r of m.tail) have.has(key(r)) ? (S.curves[have.get(key(r))] = r) : S.curves.push(r)
       m.curves = S.curves
+      m.fills ??= S.fills // unchanged lists are not resent
+      m.decisions ??= S.decisions
     }
     if (m.curves) { S = m; lastMsg = Date.now(); render() }
   }
