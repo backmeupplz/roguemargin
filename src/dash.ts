@@ -1,6 +1,7 @@
 // roguemargin.com: indexes the trader's public journal + Hyperliquid account data into
 // its own SQLite and serves the terminal. Read-only towards the trader; if this dies, trading doesn't notice.
 import { Database } from 'bun:sqlite'
+import { ok as assert } from 'node:assert'
 
 const DB = process.env.DASH_DB ?? 'data/dash.db'
 const TRADER = process.env.TRADER_URL ?? 'http://127.0.0.1:8790'
@@ -169,6 +170,47 @@ function broadcast() {
 }
 const ping = enc.encode(': ping\n\n') // keeps idle streams and proxies alive, and finds dead clients
 
+// ---- visitor address ----
+// Behind Cloudflare every request arrives from an edge IP; the visitor's own address is in cf-connecting-ip,
+// which anyone can forge by hitting the origin directly, so it only counts when the request comes from Cloudflare.
+// Ranges from https://www.cloudflare.com/ips (stable; refresh if Cloudflare announces changes).
+const CLOUDFLARE = ['173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13', '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+  '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32']
+function ipBits(ip: string): { v: bigint; len: number } | null {
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
+    const p = ip.split('.').map(Number)
+    return p.every((x) => x <= 255) ? { v: p.reduce((n, x) => (n << 8n) + BigInt(x), 0n), len: 32 } : null
+  }
+  if (!ip.includes(':')) return null
+  const [head = '', tail = '', extra] = ip.split('::')
+  if (extra !== undefined) return null
+  const h = head ? head.split(':') : [], t = tail ? tail.split(':') : []
+  const fill = 8 - h.length - t.length
+  if (ip.includes('::') ? fill < 1 : fill !== 0) return null
+  let v = 0n
+  for (const g of [...h, ...Array(fill).fill('0'), ...t]) { if (!/^[0-9a-f]{1,4}$/i.test(g)) return null; v = (v << 16n) + BigInt(parseInt(g, 16)) }
+  return { v, len: 128 }
+}
+const inRange = (ip: string, cidr: string) => {
+  const [base = '', bits = ''] = cidr.split('/'), a = ipBits(ip), b = ipBits(base)
+  if (!a || !b || a.len !== b.len) return false
+  const shift = BigInt(a.len - Number(bits))
+  return a.v >> shift === b.v >> shift
+}
+export function visitor(peer: string, cfHeader: string | null) {
+  return cfHeader && ipBits(cfHeader) && CLOUDFLARE.some((r) => inRange(peer, r)) ? cfHeader : peer
+}
+
+if (process.argv.includes('--check')) {
+  assert(visitor('104.16.5.1', '203.0.113.9') === '203.0.113.9', 'Cloudflare v4 edge: trust its header')
+  assert(visitor('2606:4700:10::6816:1', '2001:db8::1') === '2001:db8::1', 'Cloudflare v6 edge: trust its header')
+  assert(visitor('8.8.8.8', '203.0.113.9') === '8.8.8.8', 'not Cloudflare: header ignored')
+  assert(visitor('104.16.5.1', 'not-an-ip') === '104.16.5.1', 'garbage header ignored')
+  assert(visitor('104.24.0.1', null) === '104.24.0.1' && !inRange('104.32.0.1', '104.24.0.0/14') && inRange('2a06:98c7::1', '2a06:98c0::/29'), 'ranges')
+  console.log('dash ok')
+  process.exit(0)
+}
+
 // ---- headers ----
 const page = await Bun.file(new URL('../public/index.html', import.meta.url)).text()
 // The page's one inline script, allowed by hash: nothing injected into the page can run.
@@ -211,7 +253,7 @@ Bun.serve({
     '/api/live': {
       GET: (req, server) => {
         // Tugport's proxy sets x-real-ip to the real client; the container port is not reachable from outside
-        const ip = req.headers.get('x-real-ip') ?? server.requestIP(req)?.address ?? 'unknown'
+        const ip = visitor(req.headers.get('x-real-ip') ?? server.requestIP(req)?.address ?? 'unknown', req.headers.get('cf-connecting-ip'))
         if (clients.size >= MAX_CLIENTS || (perIp.get(ip) ?? 0) >= MAX_PER_IP)
           return respond('too many live connections, retry later', 'text/plain', { 'retry-after': '30' }, 429)
         server.timeout(req, 0)
