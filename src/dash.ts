@@ -20,6 +20,7 @@ create table if not exists meta (k text primary key, v text);
 // columns added after launch
 try { db.exec('alter table lanes add column treasury real default 0') } catch {}
 try { db.exec('alter table positions add column trail real') } catch {}
+try { db.exec('alter table fills add column net real') } catch {}
 
 const getMeta = (k: string) => (db.query('select v from meta where k = ?').get(k) as { v: string } | null)?.v
 const setMeta = (k: string, v: string) => db.run('insert or replace into meta values (?, ?)', [k, v])
@@ -28,7 +29,7 @@ const setMeta = (k: string, v: string) => db.run('insert or replace into meta va
 type Event =
   | { seq: number; type: 'lane'; lane: string; name: string; model: string; feed: string; mode: string; address?: string; start_equity: number; t: number; retired_at?: number }
   | { seq: number; type: 'equity'; lane: string; t: number; equity: number; treasury?: number; positions: any[] }
-  | { seq: number; type: 'fill'; lane: string; t: number; coin: string; side: string; size: number; price: number; fee: number; pnl: number; reason: string }
+  | { seq: number; type: 'fill'; lane: string; t: number; coin: string; side: string; size: number; price: number; fee: number; pnl: number; net?: number; reason: string }
   | { seq: number; type: 'decision'; lane: string; t: number; summary: string; actions: unknown; latency_ms: number; cost_usd: number }
 
 const apply = db.transaction((events: Event[]) => {
@@ -42,7 +43,7 @@ const apply = db.transaction((events: Event[]) => {
       for (const p of e.positions)
         db.run('insert into positions values (?,?,?,?,?,?,?,?,?,?,?)', [e.lane, p.coin, p.size, p.entry, p.mark, p.upnl, p.leverage, p.stop, p.target ?? null, p.liq ?? null, p.trail ?? null])
     } else if (e.type === 'fill')
-      db.run('insert or ignore into fills values (?,?,?,?,?,?,?,?,?,?)', [e.lane, e.t, e.coin, e.side, e.size, e.price, e.fee, e.pnl, e.reason, `j${e.seq}`])
+      db.run('insert or ignore into fills values (?,?,?,?,?,?,?,?,?,?,?)', [e.lane, e.t, e.coin, e.side, e.size, e.price, e.fee, e.pnl, e.reason, `j${e.seq}`, e.net ?? null])
     else if (e.type === 'decision')
       db.run('insert or ignore into decisions values (?,?,?,?,?,?,?)', [e.lane, e.t, e.summary, JSON.stringify(e.actions), e.latency_ms, e.cost_usd, `j${e.seq}`])
     setMeta('seq', String(e.seq))
@@ -66,7 +67,8 @@ async function indexLive() {
     const since = Number(getMeta(`fills:${l.id}`) ?? 0)
     const fills = (await info({ type: 'userFillsByTime', user: l.address, startTime: since + 1, aggregateByTime: true })) as any[]
     for (const f of fills)
-      db.run('insert or ignore into fills values (?,?,?,?,?,?,?,?,?,?)', [l.id, f.time, f.coin, f.side === 'B' ? 'buy' : 'sell', Number(f.sz), Number(f.px), Number(f.fee), Number(f.closedPnl), f.dir, f.hash + ':' + f.tid])
+      // ponytail: live net = closedPnl - this fill's fee; entry fee and funding are on other rows (userFunding)
+      db.run('insert or ignore into fills values (?,?,?,?,?,?,?,?,?,?,?)', [l.id, f.time, f.coin, f.side === 'B' ? 'buy' : 'sell', Number(f.sz), Number(f.px), Number(f.fee), Number(f.closedPnl), f.dir, f.hash + ':' + f.tid, Number(f.closedPnl) ? Number(f.closedPnl) - Number(f.fee) : null])
     if (fills.length) setMeta(`fills:${l.id}`, String(Math.max(...fills.map((f) => f.time))))
     const s = await info({ type: 'clearinghouseState', user: l.address })
     const t = Math.floor(Date.now() / 60_000) * 60_000

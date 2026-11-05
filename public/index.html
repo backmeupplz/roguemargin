@@ -90,7 +90,7 @@ footer { color: var(--dim); font-size: 12px; margin: 36px 0 12px; border-top: 1p
 </div>
 
 <h2>LEADERBOARD</h2>
-<div class="box scroll"><table id="board"><thead><tr><th>#</th><th class="l">Lane</th><th>Return</th><th>Equity</th><th>Chest</th><th>Trades</th><th>Fees</th><th>Open</th></tr></thead><tbody></tbody></table></div>
+<div class="box scroll"><table id="board"><thead><tr><th>#</th><th class="l">Lane</th><th>Return</th><th>Deposit</th><th>Chest</th><th>Trades</th><th>Fees</th><th>Open</th></tr></thead><tbody></tbody></table></div>
 
 <h2>OPEN POSITIONS</h2>
 <div class="box scroll"><table id="pos"><thead><tr><th>Lane</th><th>Coin</th><th>Side</th><th>Size $</th><th>Lev</th><th>Entry</th><th>Mark</th><th>Stop</th><th>Target</th><th>PnL</th></tr></thead><tbody></tbody></table></div>
@@ -99,10 +99,10 @@ footer { color: var(--dim); font-size: 12px; margin: 36px 0 12px; border-top: 1p
 <div class="box log" id="log"></div>
 
 <h2>TRADES</h2>
-<div class="box scroll"><table id="fills"><thead><tr><th>Time (UTC)</th><th>Lane</th><th>Coin</th><th>Side</th><th>Size</th><th>Price</th><th>PnL</th><th>Fee</th><th>Why</th></tr></thead><tbody></tbody></table></div>
+<div class="box scroll"><table id="fills"><thead><tr><th>Time (UTC)</th><th>Lane</th><th>Coin</th><th>Side</th><th>Size</th><th>Price</th><th>Net PnL</th><th>Fee</th><th>Why</th></tr></thead><tbody></tbody></table></div>
 
 <footer>
-  Paper lanes are simulated on live Hyperliquid prices with taker fees, slippage, hourly funding and liquidation. Live lanes are read straight from Hyperliquid by wallet address.
+  Paper lanes are simulated on live Hyperliquid prices with taker fees, slippage, hourly funding and liquidation. Return counts the deposit plus the treasury chest; the chest is profit taken out of the deposit and never traded again. Net PnL is after both fees and funding. Live lanes are read straight from Hyperliquid by wallet address.
   Not financial advice. Source: <a href="https://github.com/backmeupplz/roguemargin">github.com/backmeupplz/roguemargin</a>
 </footer>
 
@@ -133,14 +133,14 @@ function render() {
   $('#tiles').innerHTML = [
     live.length ? [`Live balance`, usd(live.reduce((s, l) => s + (l.equity || 0), 0)), live.map((l) => esc(l.name)).join(', ')] : [`Real money`, `not yet`, `paper arena first`],
     best ? [`Leader`, pct(ret(best)), esc(best.name)] : [`Leader`, '·', ''],
-    [`Treasury chest`, usd(lanes.reduce((s, l) => s + (l.treasury || 0), 0)), `25% of every winning trade, locked`],
+    [`Treasury chest`, usd(lanes.reduce((s, l) => s + (l.treasury || 0), 0)), `25% of each win's net profit, taken out of the deposit`],
     [`Lanes`, lanes.filter((l) => !l.retired_at).length, `models × data feeds`],
     [`Trades`, lanes.reduce((s, l) => s + l.trades, 0), usd(lanes.reduce((s, l) => s + l.fees, 0)) + ' in fees'],
   ].map(([k, v, s]) => `<div class="tile"><small>${k}</small><b>${v}</b><small>${s}</small></div>`).join('')
 
   $('#board tbody').innerHTML = lanes.map((l, i) => `<tr data-id="${esc(l.id)}" class="${l.id === sel ? 'sel' : ''}">
     <td>${i + 1}</td><td class="l">${esc(l.name)} <span class="pill ${l.mode === 'live' ? 'live' : ''}">${l.retired_at ? 'retired' : esc(l.mode)}</span><br><span class="muted">${isBaseline(l) ? 'baseline, no AI' : `${esc(l.model)} · ${esc(l.feed)}`}</span></td>
-    <td class="${cls(ret(l))}">${pct(ret(l))}</td><td>${l.equity != null ? usd(l.equity) : '·'}</td><td>${l.treasury ? usd(l.treasury) : '·'}</td><td>${l.trades}</td><td>${usd(l.fees)}</td><td>${open[l.id] || 0}</td></tr>`).join('') || `<tr><td colspan="8" class="empty">Waiting for the first lane.</td></tr>`
+    <td class="${cls(ret(l))}">${pct(ret(l))}</td><td>${l.equity != null ? usd(l.equity - (l.treasury || 0)) : '·'}</td><td>${l.treasury ? usd(l.treasury) : '·'}</td><td>${l.trades}</td><td>${usd(l.fees)}</td><td>${open[l.id] || 0}</td></tr>`).join('') || `<tr><td colspan="8" class="empty">Waiting for the first lane.</td></tr>`
 
   $('#pos tbody').innerHTML = S.positions.map((p) => `<tr><td>${esc(name[p.lane] ?? p.lane)}</td><td>${esc(p.coin)}</td>
     <td class="${p.size > 0 ? 'up' : 'down'}">${p.size > 0 ? 'LONG' : 'SHORT'}</td><td>${usd(Math.abs(p.size) * p.mark, 0)}</td><td>${p.leverage}x</td>
@@ -153,7 +153,7 @@ function render() {
 
   $('#fills tbody').innerHTML = S.fills.map((f) => `<tr><td>${utc(f.t)}</td><td>${esc(name[f.lane] ?? f.lane)}</td><td>${esc(f.coin)}</td>
     <td class="${f.side === 'buy' ? 'up' : 'down'}">${f.side.toUpperCase()}</td><td>${px(f.size)}</td><td>${px(f.price)}</td>
-    <td class="${cls(f.pnl)}">${f.pnl ? usd(f.pnl) : '·'}</td><td>${usd(f.fee)}</td><td class="muted">${esc(f.reason)}</td></tr>`).join('') || `<tr><td colspan="9" class="empty">No trades yet.</td></tr>`
+    <td class="${cls(f.net ?? f.pnl)}">${f.net != null ? usd(f.net) : f.pnl ? usd(f.pnl - f.fee) : '·'}</td><td>${usd(f.fee)}</td><td class="muted">${esc(f.reason)}</td></tr>`).join('') || `<tr><td colspan="9" class="empty">No trades yet.</td></tr>`
 
   $('#selname').textContent = name[sel] ?? 'selected lane'
   chart()
