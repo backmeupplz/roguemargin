@@ -71,6 +71,9 @@ tbody tr { cursor: default; }
 .log .who { color: var(--hi); } .log time { color: var(--dim); font-size: 12px; }
 .log .act { display: block; color: var(--amber); }
 .empty { color: var(--dim); padding: 14px 12px; }
+.pager { display: flex; gap: 12px; align-items: center; justify-content: flex-end; padding: 8px 0; font-size: 12px; }
+.pager button { font: inherit; color: var(--hi); background: var(--panel); border: 1px solid var(--line); padding: 6px 12px; cursor: pointer; }
+.pager button:disabled { color: var(--faint); cursor: default; }
 footer { color: var(--dim); font-size: 12px; margin: 36px 0 12px; border-top: 1px solid var(--line); padding-top: 12px; }
 .cursor::after { content: "█"; animation: blink 1s steps(1) infinite; color: var(--hi); }
 </style>
@@ -100,6 +103,7 @@ footer { color: var(--dim); font-size: 12px; margin: 36px 0 12px; border-top: 1p
 
 <h2>TRADES</h2>
 <div class="box scroll"><table id="fills"><thead><tr><th>Time (UTC)</th><th>Lane</th><th>Coin</th><th>Side</th><th>Size</th><th>Price</th><th>Net PnL</th><th>Fee</th><th>Why</th></tr></thead><tbody></tbody></table></div>
+<div class="pager"><button id="newer" type="button">‹ Newer</button><span id="pageinfo" class="muted"></span><button id="older" type="button">Older ›</button></div>
 
 <footer>
   Paper lanes are simulated on live Hyperliquid prices with taker fees, slippage, hourly funding and liquidation. Return counts the deposit plus the treasury chest; the chest is profit taken out of the deposit and never traded again. Net PnL is after both fees and funding. Live lanes are read straight from Hyperliquid by wallet address.
@@ -158,9 +162,7 @@ function render() {
     return `<p><time>${utc(d.t)}</time> <span class="who">${esc(name[d.lane] ?? d.lane)}</span>${acts ? `<span class="act">${esc(acts)}</span>` : ''} ${esc(d.summary)}</p>`
   }).join('') || `<p class="empty">No decisions yet.</p>`
 
-  $('#fills tbody').innerHTML = S.fills.map((f) => `<tr><td>${utc(f.t)}</td><td>${esc(name[f.lane] ?? f.lane)}</td><td>${esc(f.coin)}</td>
-    <td class="${f.side === 'buy' ? 'up' : 'down'}">${esc(String(f.side ?? '').toUpperCase())}</td><td>${px(f.size)}</td><td>${px(f.price)}</td>
-    <td class="${cls(f.net ?? f.pnl)}">${f.net != null ? usd(f.net) : f.pnl ? usd(f.pnl - f.fee) : '·'}</td><td>${usd(f.fee)}</td><td class="muted">${esc(f.reason)}</td></tr>`).join('') || `<tr><td colspan="9" class="empty">No trades yet.</td></tr>`
+  renderFills(name)
 
   $('#selname').textContent = name[sel] ?? 'selected lane'
   chart()
@@ -212,6 +214,30 @@ const niceStep = (r) => { const p = 10 ** Math.floor(Math.log10(r)); return [1, 
 
 $('#board').addEventListener('click', (e) => { const tr = e.target.closest('tr[data-id]'); if (tr) { sel = tr.dataset.id; render() } })
 addEventListener('resize', () => S && chart())
+
+// Trades: page 0 (newest) is live from the stream, older pages are fetched on demand.
+let tradePage = 0, pageData = null
+function renderFills(name) {
+  const fills = tradePage === 0 ? S.fills || [] : pageData?.fills || []
+  const total = tradePage === 0 ? Number(S.fillsTotal) || fills.length : Number(pageData?.total) || 0
+  const size = Number(pageData?.size) || 50
+  $('#fills tbody').innerHTML = fills.map((f) => `<tr><td>${utc(f.t)}</td><td>${esc(name[f.lane] ?? f.lane)}</td><td>${esc(f.coin)}</td>
+    <td class="${f.side === 'buy' ? 'up' : 'down'}">${esc(String(f.side ?? '').toUpperCase())}</td><td>${px(f.size)}</td><td>${px(f.price)}</td>
+    <td class="${cls(f.net ?? f.pnl)}">${f.net != null ? usd(f.net) : f.pnl ? usd(f.pnl - f.fee) : '·'}</td><td>${usd(f.fee)}</td><td class="muted">${esc(f.reason)}</td></tr>`).join('') || `<tr><td colspan="9" class="empty">No trades yet.</td></tr>`
+  const from = fills.length ? tradePage * size + 1 : 0, to = tradePage * size + fills.length
+  $('#pageinfo').textContent = total ? `${from.toLocaleString('en-US')}–${to.toLocaleString('en-US')} of ${total.toLocaleString('en-US')}` : ''
+  $('#newer').disabled = tradePage === 0
+  $('#older').disabled = to >= total
+}
+async function goPage(p) {
+  if (p <= 0) { tradePage = 0; pageData = null; if (S) render(); return }
+  try {
+    const d = await (await fetch(`/api/fills?page=${p}`)).json()
+    if (d && Array.isArray(d.fills) && d.fills.length) { tradePage = p; pageData = d; render() }
+  } catch {}
+}
+$('#newer').addEventListener('click', () => goPage(tradePage - 1))
+$('#older').addEventListener('click', () => goPage(tradePage + 1))
 
 function connect() {
   const es = new EventSource('/api/live')

@@ -109,6 +109,7 @@ let tailFrom = Date.now()
 let stamp = 0
 
 // fills and decisions only travel when they changed; the page keeps its previous copy otherwise
+const PAGE = 50 // trades per page
 const version = (table: string) => JSON.stringify(db.query(`select count(*) as n, max(t) as t from ${table}`).get())
 let sent = { fills: '', decisions: '' }
 
@@ -128,7 +129,9 @@ function snapshot(full: boolean) {
     curves: full ? curves(Date.now() - 30 * 86400_000) : undefined,
     tail: full ? undefined : db.query('select lane, t, equity from equity where t >= ? order by t').all(tailFrom),
     positions: db.query('select * from positions').all(),
-    fills: changed.fills ? db.query('select * from fills order by t desc limit 200').all() : undefined,
+    // the newest page of trades travels live; older pages come from /api/fills
+    fills: changed.fills ? db.query('select * from fills order by t desc, id desc limit ?').all(PAGE) : undefined,
+    fillsTotal: (db.query('select count(*) as n from fills').get() as { n: number }).n,
     decisions: changed.decisions ? db.query('select * from decisions order by t desc limit 60').all() : undefined,
   }
 }
@@ -250,6 +253,15 @@ Bun.serve({
   routes: {
     '/': { GET: () => respond(page, 'text/html; charset=utf-8', { 'cache-control': 'no-cache', 'content-security-policy': CSP }) },
     '/api/state': { GET: () => respond(fullJSON(), 'application/json', { 'cache-control': 'no-cache' }) },
+    // older trades, one page at a time (?page=0 is the newest); the page number is clamped, nothing else is read from the query
+    '/api/fills': {
+      GET: (req) => {
+        const page = Math.min(100_000, Math.max(0, Math.floor(Number(new URL(req.url).searchParams.get('page')) || 0)))
+        const fills = db.query('select * from fills order by t desc, id desc limit ? offset ?').all(PAGE, page * PAGE)
+        const total = (db.query('select count(*) as n from fills').get() as { n: number }).n
+        return respond(JSON.stringify({ page, size: PAGE, total, fills }), 'application/json', { 'cache-control': 'no-cache' })
+      },
+    },
     '/api/live': {
       GET: (req, server) => {
         // Tugport's proxy sets x-real-ip to the real client; the container port is not reachable from outside
