@@ -221,11 +221,11 @@ const script = page.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? ''
 const scriptHash = new Bun.CryptoHasher('sha256').update(script).digest('base64')
 const CSP = [
   "default-src 'none'",
-  `script-src 'sha256-${scriptHash}'`,
+  `script-src 'sha256-${scriptHash}' https://lumen.borodutch.com`,
   "style-src 'unsafe-inline' https://fonts.googleapis.com",
   'font-src https://fonts.gstatic.com',
   "img-src 'self' data:",
-  "connect-src 'self'",
+  "connect-src 'self' https://lumen.borodutch.com",
   "base-uri 'none'",
   "form-action 'none'",
   "frame-ancestors 'none'",
